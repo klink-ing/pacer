@@ -1,0 +1,4 @@
+# All files require review from @dogmar.
+# Used with the "Require review from Code Owners" ruleset setting so that
+# collaborator PRs require dogmar's approval before merging.
+* @dogmar
