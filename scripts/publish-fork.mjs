@@ -43,20 +43,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 const PACKAGES_DIR = join(ROOT, 'packages')
 
-// These are the 10 packages in this repo that we publish under @klinking.
+// These are the packages in this repo that we publish under @klinking.
 // Everything else under @tanstack/* (store, react-store, devtools-ui, etc.)
 // is an external dependency published by TanStack — we leave those as-is.
+//
+// Excluded from publishing:
+//   - @tanstack/angular-pacer: fork doesn't modify the Angular adapter
+//   - @tanstack/pacer-devtools: upstream devtools works as-is with maxWait
 const INTERNAL_PACKAGES = new Set([
   '@tanstack/pacer',
   '@tanstack/pacer-lite',
-  '@tanstack/pacer-devtools',
   '@tanstack/react-pacer',
   '@tanstack/react-pacer-devtools',
   '@tanstack/solid-pacer',
   '@tanstack/solid-pacer-devtools',
   '@tanstack/preact-pacer',
   '@tanstack/preact-pacer-devtools',
-  '@tanstack/angular-pacer',
 ])
 
 /** @tanstack/react-pacer → @klinking/react-pacer */

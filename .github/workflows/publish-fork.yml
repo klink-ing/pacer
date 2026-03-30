@@ -32,11 +32,15 @@ jobs:
         id: changes
         run: |
           changed=""
+          # Packages we don't publish (no fork-specific changes)
+          skip="angular-pacer pacer-devtools"
           for dir in packages/*/; do
             dir_name=$(basename "$dir")
             pkg_file="$dir/package.json"
             # Skip dirs without package.json
             [ -f "$pkg_file" ] || continue
+            # Skip packages not published by the fork
+            echo "$skip" | grep -qw "$dir_name" && continue
 
             old_version=$(git show HEAD~1:"$pkg_file" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)
             new_version=$(jq -r '.version // empty' "$pkg_file")
