@@ -193,29 +193,11 @@ jobs:
             git commit --no-edit
           fi
 
-          # Revert any .github/workflows/ changes from the merge. The default
-          # GITHUB_TOKEN lacks the `workflow` scope, so a push touching workflow
-          # files is rejected by GitHub. This handles upstream workflow edits
-          # that merged cleanly (no conflict) as well as new workflow files
-          # added upstream. Bring upstream workflow changes in via a separate
-          # PR with a PAT that has the `workflow` scope.
-          WORKFLOW_CHANGES=$(git diff --name-only HEAD origin/main -- .github/workflows/)
-          if [ -n "$WORKFLOW_CHANGES" ]; then
-            echo "Reverting .github/workflows/ changes (GITHUB_TOKEN lacks workflow scope):"
-            for f in $WORKFLOW_CHANGES; do
-              echo "  $f"
-              if git cat-file -e "origin/main:$f" 2>/dev/null; then
-                git checkout origin/main -- "$f"
-                git add "$f"
-              else
-                git rm -f "$f"
-              fi
-              AUTO_RESOLVED="${AUTO_RESOLVED}  ${f} (reverted post-merge — workflows token cannot push)\n"
-            done
-            git commit --amend --no-edit
-          fi
-
           echo "auto_resolved=$(echo -e "$AUTO_RESOLVED" | base64 -w 0)" >> "$GITHUB_OUTPUT"
+
+          # If the push fails because the merge touches .github/workflows/* (the
+          # default GITHUB_TOKEN lacks the `workflow` scope), pull the branch
+          # locally and finish the merge by hand.
           git push origin "$BRANCH"
 
       - name: Create PR
