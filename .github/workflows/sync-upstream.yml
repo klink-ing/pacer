@@ -109,90 +109,112 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          AUTO_RESOLVED=""
+
           # Attempt the merge — allow failure so we can auto-resolve conflicts
           echo "Merging upstream/main into fork branch..."
           if git merge upstream/main -m "Merge upstream TanStack Pacer v${VERSION} into fork"; then
             echo "Merge completed cleanly"
-            echo "auto_resolved=" >> "$GITHUB_OUTPUT"
-            git push origin "$BRANCH"
-            exit 0
+          else
+            echo "Merge has conflicts — attempting auto-resolution..."
+            CONFLICTED=$(git diff --name-only --diff-filter=U)
+
+            # ── Auto-resolution rules ─────────────────────────────────────
+            # Each rule handles a category of files that we never customize
+            # in the fork and can safely resolve automatically.
+            UNRESOLVED=""
+
+            for FILE in $CONFLICTED; do
+              case "$FILE" in
+                # Generated docs — take upstream; autofix CI regenerates them
+                docs/*)
+                  git checkout --theirs -- "$FILE" && git add "$FILE"
+                  AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (took upstream — generated docs)\n"
+                  ;;
+                # CI workflows — always keep fork version. GITHUB_TOKEN cannot
+                # push workflow file changes anyway, and the fork intentionally
+                # diverges on workflows. Upstream workflow changes can be
+                # cherry-picked manually with a PAT that has `workflow` scope.
+                .github/workflows/*)
+                  if git cat-file -e ":2:$FILE" 2>/dev/null; then
+                    git checkout --ours -- "$FILE" && git add "$FILE"
+                    AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (kept fork version — workflows token cannot push)\n"
+                  else
+                    # Deleted in fork (modify/delete conflict) — keep deleted
+                    git rm -f "$FILE" 2>/dev/null || true
+                    AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (kept deleted — workflows token cannot push)\n"
+                  fi
+                  ;;
+                # Upstream changelogs — take upstream; fork doesn't add entries
+                packages/*/CHANGELOG.md)
+                  git checkout --theirs -- "$FILE" && git add "$FILE"
+                  AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (took upstream — changelog)\n"
+                  ;;
+                # Lockfile — take upstream, then reconcile with fork's root package.json
+                pnpm-lock.yaml)
+                  git checkout --theirs -- "$FILE" && git add "$FILE"
+                  AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (took upstream + pnpm install to reconcile)\n"
+                  NEEDS_LOCKFILE_RECONCILE=true
+                  ;;
+                # Example app package.json — take upstream; fork doesn't modify examples
+                examples/*/package.json | examples/*/*/package.json)
+                  git checkout --theirs -- "$FILE" && git add "$FILE"
+                  AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (took upstream — example dep versions)\n"
+                  ;;
+                # Everything else requires manual review
+                *)
+                  UNRESOLVED="${UNRESOLVED}  ${FILE}\n"
+                  ;;
+              esac
+            done
+
+            if [ -n "$AUTO_RESOLVED" ]; then
+              echo "Auto-resolved conflicts:"
+              echo -e "$AUTO_RESOLVED"
+            fi
+
+            # If any conflicts remain that we can't auto-resolve, abort
+            REMAINING=$(git diff --name-only --diff-filter=U)
+            if [ -n "$REMAINING" ]; then
+              echo "::error::Unable to auto-resolve all conflicts. Manual intervention required:"
+              echo -e "$UNRESOLVED"
+              git merge --abort
+              exit 1
+            fi
+
+            # Reconcile lockfile if it was conflict-resolved
+            if [ "${NEEDS_LOCKFILE_RECONCILE:-}" = "true" ]; then
+              echo "Running pnpm install to reconcile lockfile with fork's package.json..."
+              pnpm install --no-frozen-lockfile
+              git add pnpm-lock.yaml
+            fi
+
+            # All conflicts resolved — complete the merge
+            git commit --no-edit
           fi
 
-          echo "Merge has conflicts — attempting auto-resolution..."
-          CONFLICTED=$(git diff --name-only --diff-filter=U)
-
-          # ── Auto-resolution rules ─────────────────────────────────────
-          # Each rule handles a category of files that we never customize
-          # in the fork and can safely resolve automatically.
-          AUTO_RESOLVED=""
-          UNRESOLVED=""
-
-          for FILE in $CONFLICTED; do
-            case "$FILE" in
-              # Generated docs — take upstream; autofix CI regenerates them
-              docs/*)
-                git checkout --theirs -- "$FILE" && git add "$FILE"
-                AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (took upstream — generated docs)\n"
-                ;;
-              # CI workflows deleted in fork (e.g. release.yml) — keep deleted
-              .github/workflows/release.yml)
-                git rm -f "$FILE" 2>/dev/null || true
-                AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (kept deleted — fork uses publish-fork.yml)\n"
-                ;;
-              # PR workflow — keep fork's simplified version (no NX Cloud, no
-              # nx-set-shas, no preview job, uses test:ci). The fork has
-              # intentionally diverged here; upstream changes are not adopted
-              # automatically and can be cherry-picked manually if desired.
-              .github/workflows/pr.yml)
-                git checkout --ours -- "$FILE" && git add "$FILE"
-                AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (kept fork version — simplified PR workflow)\n"
-                ;;
-              # Upstream changelogs — take upstream; fork doesn't add entries
-              packages/*/CHANGELOG.md)
-                git checkout --theirs -- "$FILE" && git add "$FILE"
-                AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (took upstream — changelog)\n"
-                ;;
-              # Lockfile — take upstream, then reconcile with fork's root package.json
-              pnpm-lock.yaml)
-                git checkout --theirs -- "$FILE" && git add "$FILE"
-                AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (took upstream + pnpm install to reconcile)\n"
-                NEEDS_LOCKFILE_RECONCILE=true
-                ;;
-              # Example app package.json — take upstream; fork doesn't modify examples
-              examples/*/package.json | examples/*/*/package.json)
-                git checkout --theirs -- "$FILE" && git add "$FILE"
-                AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (took upstream — example dep versions)\n"
-                ;;
-              # Everything else requires manual review
-              *)
-                UNRESOLVED="${UNRESOLVED}  ${FILE}\n"
-                ;;
-            esac
-          done
-
-          if [ -n "$AUTO_RESOLVED" ]; then
-            echo "Auto-resolved conflicts:"
-            echo -e "$AUTO_RESOLVED"
+          # Revert any .github/workflows/ changes from the merge. The default
+          # GITHUB_TOKEN lacks the `workflow` scope, so a push touching workflow
+          # files is rejected by GitHub. This handles upstream workflow edits
+          # that merged cleanly (no conflict) as well as new workflow files
+          # added upstream. Bring upstream workflow changes in via a separate
+          # PR with a PAT that has the `workflow` scope.
+          WORKFLOW_CHANGES=$(git diff --name-only HEAD origin/main -- .github/workflows/)
+          if [ -n "$WORKFLOW_CHANGES" ]; then
+            echo "Reverting .github/workflows/ changes (GITHUB_TOKEN lacks workflow scope):"
+            for f in $WORKFLOW_CHANGES; do
+              echo "  $f"
+              if git cat-file -e "origin/main:$f" 2>/dev/null; then
+                git checkout origin/main -- "$f"
+                git add "$f"
+              else
+                git rm -f "$f"
+              fi
+              AUTO_RESOLVED="${AUTO_RESOLVED}  ${f} (reverted post-merge — workflows token cannot push)\n"
+            done
+            git commit --amend --no-edit
           fi
 
-          # If any conflicts remain that we can't auto-resolve, abort
-          REMAINING=$(git diff --name-only --diff-filter=U)
-          if [ -n "$REMAINING" ]; then
-            echo "::error::Unable to auto-resolve all conflicts. Manual intervention required:"
-            echo -e "$UNRESOLVED"
-            git merge --abort
-            exit 1
-          fi
-
-          # Reconcile lockfile if it was conflict-resolved
-          if [ "${NEEDS_LOCKFILE_RECONCILE:-}" = "true" ]; then
-            echo "Running pnpm install to reconcile lockfile with fork's package.json..."
-            pnpm install --no-frozen-lockfile
-            git add pnpm-lock.yaml
-          fi
-
-          # All conflicts resolved — complete the merge
-          git commit --no-edit
           echo "auto_resolved=$(echo -e "$AUTO_RESOLVED" | base64 -w 0)" >> "$GITHUB_OUTPUT"
           git push origin "$BRANCH"
 
