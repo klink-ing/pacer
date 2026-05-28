@@ -68,7 +68,7 @@ jobs:
           # Store changed list for PR body (base64 to preserve newlines)
           echo "changed=$(echo -e "$CHANGED" | base64 -w 0)" >> "$GITHUB_OUTPUT"
 
-      - name: Check for existing PR
+      - name: Check for existing PR or branch
         if: steps.compare.outputs.needs_sync == 'true'
         id: check_pr
         env:
@@ -90,12 +90,27 @@ jobs:
             echo "pr_exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # The sync branch can outlive the run that created it: a prior run may
+          # have pushed it but failed before opening a PR (or the PR was later
+          # closed). Because the branch name is derived from the upstream commit
+          # date, every subsequent run computes the same name, re-creates the
+          # branch from origin/main, and produces a diverged history that git
+          # rejects on push as non-fast-forward — wedging the workflow until the
+          # branch is removed by hand. Detect the existing remote branch so we
+          # skip the merge/push and just (re)open the PR against what's there.
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Branch $BRANCH already exists on remote"
+            echo "branch_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Tools
-        if: steps.compare.outputs.needs_sync == 'true' && steps.check_pr.outputs.pr_exists == 'false'
+        if: steps.compare.outputs.needs_sync == 'true' && steps.check_pr.outputs.pr_exists == 'false' && steps.check_pr.outputs.branch_exists == 'false'
         uses: tanstack/config/.github/setup@main
 
       - name: Merge upstream into fork branch
-        if: steps.compare.outputs.needs_sync == 'true' && steps.check_pr.outputs.pr_exists == 'false'
+        if: steps.compare.outputs.needs_sync == 'true' && steps.check_pr.outputs.pr_exists == 'false' && steps.check_pr.outputs.branch_exists == 'false'
         id: merge
         run: |
           VERSION=${{ steps.compare.outputs.upstream_version }}
