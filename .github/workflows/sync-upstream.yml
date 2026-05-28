@@ -81,7 +81,12 @@ jobs:
           VERSION=${{ steps.compare.outputs.upstream_version }}
           DATE=${{ steps.compare.outputs.date }}
           BRANCH="sync/v${VERSION}-${DATE}"
-          EXISTING=$(gh pr list --head "$BRANCH" --json number --jq 'length')
+          # Match PRs in ANY state. A closed (not merged) sync PR means this
+          # version was deliberately rejected — re-creating it would also fail
+          # at `gh pr create`, which refuses a second PR for a head that already
+          # has one. Treating closed as "exists" skips the sync entirely until
+          # the branch is removed by hand.
+          EXISTING=$(gh pr list --head "$BRANCH" --state all --json number --jq 'length')
 
           if [ "$EXISTING" -gt 0 ]; then
             echo "PR already exists for $BRANCH"
@@ -91,13 +96,14 @@ jobs:
           fi
 
           # The sync branch can outlive the run that created it: a prior run may
-          # have pushed it but failed before opening a PR (or the PR was later
-          # closed). Because the branch name is derived from the upstream commit
-          # date, every subsequent run computes the same name, re-creates the
-          # branch from origin/main, and produces a diverged history that git
-          # rejects on push as non-fast-forward — wedging the workflow until the
-          # branch is removed by hand. Detect the existing remote branch so we
-          # skip the merge/push and just (re)open the PR against what's there.
+          # have pushed it but failed before opening a PR. Because the branch
+          # name is derived from the upstream commit date, every subsequent run
+          # computes the same name, re-creates the branch from origin/main, and
+          # produces a diverged history that git rejects on push as
+          # non-fast-forward — wedging the workflow until the branch is removed
+          # by hand. Detect the existing remote branch so we skip the merge/push
+          # and just open the PR against what's there. (A branch whose PR was
+          # closed is already handled above via pr_exists.)
           if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
             echo "Branch $BRANCH already exists on remote"
             echo "branch_exists=true" >> "$GITHUB_OUTPUT"
