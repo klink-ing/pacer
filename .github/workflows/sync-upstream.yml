@@ -68,7 +68,7 @@ jobs:
           # Store changed list for PR body (base64 to preserve newlines)
           echo "changed=$(echo -e "$CHANGED" | base64 -w 0)" >> "$GITHUB_OUTPUT"
 
-      - name: Check for existing PR
+      - name: Check for existing PR or branch
         if: steps.compare.outputs.needs_sync == 'true'
         id: check_pr
         env:
@@ -81,7 +81,12 @@ jobs:
           VERSION=${{ steps.compare.outputs.upstream_version }}
           DATE=${{ steps.compare.outputs.date }}
           BRANCH="sync/v${VERSION}-${DATE}"
-          EXISTING=$(gh pr list --head "$BRANCH" --json number --jq 'length')
+          # Match PRs in ANY state. A closed (not merged) sync PR means this
+          # version was deliberately rejected — re-creating it would also fail
+          # at `gh pr create`, which refuses a second PR for a head that already
+          # has one. Treating closed as "exists" skips the sync entirely until
+          # the branch is removed by hand.
+          EXISTING=$(gh pr list --head "$BRANCH" --state all --json number --jq 'length')
 
           if [ "$EXISTING" -gt 0 ]; then
             echo "PR already exists for $BRANCH"
@@ -90,12 +95,28 @@ jobs:
             echo "pr_exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # The sync branch can outlive the run that created it: a prior run may
+          # have pushed it but failed before opening a PR. Because the branch
+          # name is derived from the upstream commit date, every subsequent run
+          # computes the same name, re-creates the branch from origin/main, and
+          # produces a diverged history that git rejects on push as
+          # non-fast-forward — wedging the workflow until the branch is removed
+          # by hand. Detect the existing remote branch so we skip the merge/push
+          # and just open the PR against what's there. (A branch whose PR was
+          # closed is already handled above via pr_exists.)
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Branch $BRANCH already exists on remote"
+            echo "branch_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Tools
-        if: steps.compare.outputs.needs_sync == 'true' && steps.check_pr.outputs.pr_exists == 'false'
+        if: steps.compare.outputs.needs_sync == 'true' && steps.check_pr.outputs.pr_exists == 'false' && steps.check_pr.outputs.branch_exists == 'false'
         uses: tanstack/config/.github/setup@main
 
       - name: Merge upstream into fork branch
-        if: steps.compare.outputs.needs_sync == 'true' && steps.check_pr.outputs.pr_exists == 'false'
+        if: steps.compare.outputs.needs_sync == 'true' && steps.check_pr.outputs.pr_exists == 'false' && steps.check_pr.outputs.branch_exists == 'false'
         id: merge
         run: |
           VERSION=${{ steps.compare.outputs.upstream_version }}
@@ -134,10 +155,15 @@ jobs:
                 git checkout --theirs -- "$FILE" && git add "$FILE"
                 AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (took upstream — generated docs)\n"
                 ;;
-              # CI workflows deleted in fork (e.g. release.yml) — keep deleted
-              .github/workflows/release.yml)
+              # Files the fork intentionally removed — keep deleted. Upstream
+              # still ships these, so an upstream edit surfaces as a
+              # modify/delete conflict that we resolve back to "deleted":
+              #   - release.yml: fork publishes via publish-fork.yml
+              #   - zizmor.yml:  fork does not run the zizmor security scan
+              #   - CODEOWNERS:  fork does not use upstream's code owners
+              .github/workflows/release.yml | .github/workflows/zizmor.yml | .github/CODEOWNERS)
                 git rm -f "$FILE" 2>/dev/null || true
-                AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (kept deleted — fork uses publish-fork.yml)\n"
+                AUTO_RESOLVED="${AUTO_RESOLVED}  ${FILE} (kept deleted — removed in fork)\n"
                 ;;
               # PR workflow — keep fork's simplified version (no NX Cloud, no
               # nx-set-shas, no preview job, uses test:ci). The fork has
