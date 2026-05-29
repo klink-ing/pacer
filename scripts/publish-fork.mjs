@@ -118,7 +118,7 @@ function main() {
   // ── Step 3: Rewrite package.json files ────────────────────────────────
   // Temporarily mutate each package.json for publishing. Changes:
   //   - "name" field: @tanstack/X → @klinking/X
-  //   - "repository.url": TanStack/pacer → dogmar/pacer (for provenance attestation)
+  //   - "repository.url": point at this fork's repo (for provenance attestation)
   //   - Internal deps: "workspace:*" → "npm:@klinking/X@<exact-version>"
   //   - Internal peer deps with semver: ">=0.16.4" → "npm:@klinking/X@>=0.16.4"
   // External deps like @tanstack/store are NOT touched.
@@ -131,10 +131,12 @@ function main() {
     console.log(`\n${originalName} -> ${pkg.name}`)
 
     if (pkg.repository?.url) {
-      pkg.repository.url = pkg.repository.url.replace(
-        'TanStack/pacer',
-        'dogmar/pacer',
-      )
+      // npm --provenance signs an attestation from the GitHub OIDC token and
+      // the registry rejects the publish unless repository.url matches the repo
+      // that produced it. Derive the slug from the Actions context so this never
+      // drifts on a rename; fall back to the current fork slug for local runs.
+      const repoSlug = process.env.GITHUB_REPOSITORY ?? 'klink-ing/pacer'
+      pkg.repository.url = `git+https://github.com/${repoSlug}.git`
       console.log(`  repository.url -> ${pkg.repository.url}`)
     }
 
